@@ -1,56 +1,47 @@
-import os
+from __future__ import annotations
+
 import pandas as pd
-import pandas_ta as ta
 
-# --- Load from .env or default fallback
-RSI_WINDOW = int(os.getenv("RSI_WINDOW", 14))
-RSI_ENTRY_THRESHOLD = float(os.getenv("RSI_ENTRY_THRESHOLD", 50))
-RSI_EXIT_THRESHOLD = float(os.getenv("RSI_EXIT_THRESHOLD", 45))
-EMA_FAST = int(os.getenv("EMA_FAST", 8))
-EMA_SLOW = int(os.getenv("EMA_SLOW", 21))
-ATR_WINDOW = int(os.getenv("ATR_WINDOW", 14))
 
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
+def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    """Return the Relative Strength Index for ``series``.
 
-    # Validate OHLC data
-    if df[["high", "low", "close"]].isnull().any().any() or len(df) < 30:
-        raise ValueError("OHLC data is incomplete or too short for indicators")
+    The implementation follows the classic Wilder's RSI calculation and
+    returns a :class:`pandas.Series` of the same length as the input.
+    """
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.rolling(window=period, min_periods=period).mean()
+    avg_loss = loss.rolling(window=period, min_periods=period).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(0)
 
-    # Apply Supertrend
-    df.ta.supertrend(length=10, multiplier=3.0, append=True)
 
-    # Correct dynamic column references
-    st_col = "SUPERT_10_3.0"
-    dir_col = "SUPERTd_10_3.0"
+def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Compute the Average True Range (ATR) for the given ``df``.
 
-    if st_col not in df.columns or dir_col not in df.columns:
-        raise ValueError("Supertrend columns not found")
+    ``df`` must contain ``High``, ``Low`` and ``Close`` columns.
+    """
+    high_low = df['High'] - df['Low']
+    high_close = (df['High'] - df['Close'].shift()).abs()
+    low_close = (df['Low'] - df['Close'].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    atr = tr.rolling(window=period, min_periods=period).mean()
+    return atr
 
-    # Add ATR
-    df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=ATR_WINDOW)
 
-    # Normalize names for bot logic
-    df["supertrend"] = df[st_col]
-    df["trend"] = df[dir_col]
-    df["rsi"] = ta.rsi(df["close"], length=RSI_WINDOW)
+def generate_signals(df: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """Generate a basic signal DataFrame.
 
-    df.dropna(subset=["supertrend", "trend", "rsi", "atr"], inplace=True)
-    return df
-
-def generate_signal(df: pd.DataFrame, fear_greed_score: float = None) -> str:
-    if len(df) < 2:
-        return None
-
-    curr = df.iloc[-1]
-    trend = curr["trend"]
-    rsi = curr["rsi"]
-
-    if trend == 1 and rsi > RSI_ENTRY_THRESHOLD:
-        if fear_greed_score is None or fear_greed_score >= float(os.getenv("MIN_FG_SCORE_FOR_ENTRY", 30)):
-            return "buy"
-
-    if trend == -1 or rsi < RSI_EXIT_THRESHOLD:
-        return "sell"
-
-    return None
+    The function is intentionally simple: it calculates RSI and ATR using the
+    provided configuration and adds an ``entry_signal`` column initialised to 0.
+    """
+    result = df.copy()
+    rsi_period = config.get('rsi_period', 14)
+    atr_period = config.get('atr_period', 14)
+    result['rsi'] = calculate_rsi(result['Close'], rsi_period)
+    result['atr'] = calculate_atr(result, atr_period)
+    result['entry_signal'] = 0
+    return result
