@@ -1,0 +1,91 @@
+import pandas as pd
+import krakenex
+import time
+
+# Kraken-supported intervals
+SUPPORTED_KRAKEN_INTERVALS = [1, 5, 15, 30, 60, 240, 1440, 10080, 21600]
+
+# Map user-friendly pairs to Kraken's internal codes
+PAIR_OVERRIDES = {
+    'BTC/USD': 'XBTUSD',
+    'ETH/USD': 'ETHUSD',
+    'DOGE/USD': 'DOGEUSD',
+    'XRP/USD': 'XRPUSD',
+    'DOGE/BTC': 'XDGXBT',
+    'BTC/CAD': 'XBTCAD',
+}
+
+def fetch_ohlc(symbol: str, interval: int = 240, since: int = None, max_months: int = 12, paged: bool = False) -> pd.DataFrame:
+    api = krakenex.API()
+    pair = PAIR_OVERRIDES.get(symbol, symbol.replace("/", ""))
+
+    # Fallbacks for unsupported intervals
+    if interval not in SUPPORTED_KRAKEN_INTERVALS:
+        if interval == 720:
+            print("? Interval 720 not supported by Kraken, using 240 and resampling to 12h.")
+            raw_interval = 240
+            resample_to = "12h"
+        elif interval == 120:
+            print("? Interval 120 not supported by Kraken, using 60 and resampling to 2h.")
+            raw_interval = 60
+            resample_to = "2h"
+        else:
+            raise ValueError(f"? Interval {interval} not supported and no resample fallback defined.")
+    else:
+        raw_interval = interval
+        resample_to = None
+
+    interval_secs = raw_interval * 60
+    now = int(time.time())
+    since_ts = since or now - (max_months * 30 * 24 * 60 * 60)
+    target_bars = int(max_months * 30 * 24 * 60 / raw_interval)
+
+    rows = []
+
+    if paged:
+        print(f"?? Fetching {symbol} at {raw_interval}min intervals (paged)...")
+        for _ in range(50):
+            resp = api.query_public('OHLC', {'pair': pair, 'interval': raw_interval, 'since': since_ts})
+            result = resp.get("result", {})
+            pair_key = next((k for k in result if k != "last"), None)
+            if not pair_key or not result.get(pair_key):
+                print("?? Kraken returned no data.")
+                return pd.DataFrame()
+            data = result[pair_key]
+            rows.extend(data)
+            since_ts = result.get("last", since_ts)
+            if len(rows) >= target_bars:
+                break
+            time.sleep(2)  # Rate limit
+    else:
+        #print(f"?? Fetching {symbol} at {raw_interval}min intervals (single call)...")
+        resp = api.query_public('OHLC', {'pair': pair, 'interval': raw_interval, 'since': since_ts})
+        result = resp.get("result", {})
+        pair_key = next((k for k in result if k != "last"), None)
+        if not pair_key or not result.get(pair_key):
+            print("?? Kraken returned no data.")
+            return pd.DataFrame()
+        rows = result[pair_key]
+
+    # Build dataframe
+    df = pd.DataFrame(rows, columns=["time", "open", "high", "low", "close", "vwap", "volume", "count"])
+    df["time"] = pd.to_datetime(df["time"], unit="s")
+    for col in ["open", "high", "low", "close", "vwap", "volume"]:
+        df[col] = df[col].astype(float)
+    df = df.sort_values("time").drop_duplicates("time").reset_index(drop=True)
+
+    # Resample if needed
+    if resample_to:
+        df = df.set_index("time").resample(resample_to).agg({
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "vwap": "mean",
+            "volume": "sum",
+            "count": "sum"
+        }).dropna().reset_index()
+        print(f"? Resampled to {resample_to}: {len(df)} rows")
+
+    #print(f"? Final dataset: {len(df)} rows")
+    return df

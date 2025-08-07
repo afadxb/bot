@@ -1,0 +1,12 @@
+krakenex
+pandas
+python-dotenv
+SQLAlchemy
+pymysql
+ta
+schedule
+streamlit
+streamlit-autorefresh
+pushover-python
+schedule
+ta 

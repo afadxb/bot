@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+##"""
+#Capital-aware back-test runner that re-uses your live strategy code.
+#• Trades BTC/USD on 4-hour candles (interval = 240 min)
+#• Uses 100 % of available cash per entry minus a 0.5 % fee
+#• Logs each closed trade and builds an equity curve
+#• Exports trades to logs/trade_log.csv for your Streamlit dashboard
+#"""
+
+import os, sys
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(ROOT)
+
+import time
+import pandas as pd
+from datetime import datetime
+from core.data_loader import fetch_ohlc
+from core.strategy     import add_indicators, generate_signal
+
+# -- CONFIG ---------------------------------------------------------------
+SYMBOL        = "BTC/USD"
+INTERVAL_MIN  = 120               # 4-hour candles
+MONTHS_BACK   = 12                 # look-back window
+INIT_CAPITAL  = 10000.0          # starting USD
+FEE_RATE      = 0.005             # 0.5 % per side
+CSV_PATH      = "logs/trade_log.csv"
+
+os.makedirs("logs", exist_ok=True)
+
+# -- FETCH HISTORY --------------------------------------------------------
+since_ts = int(time.time()) - MONTHS_BACK * 30 * 24 * 60 * 60  # N months ago
+df = fetch_ohlc(SYMBOL, interval=INTERVAL_MIN, since=since_ts,paged=True)
+df["time"] = pd.to_datetime(df["time"])
+
+#print(df)
+
+# add indicators
+df = add_indicators(df)
+
+# -- SIMULATE BAR-BY-BAR --------------------------------------------------
+capital   = INIT_CAPITAL   # USD
+position  = 0.0            # BTC
+entry_px  = 0.0
+entry_ts  = None
+trades    = []
+
+print(f"Starting back-test: {SYMBOL}, {MONTHS_BACK} months,{INTERVAL_MIN}, "f"init_capital = {INIT_CAPITAL:,.2f} USD")
+
+for i in range(1, len(df)):
+    window = df.iloc[: i + 1]
+    price  = window["close"].iat[-1]
+    ts     = window["time"].iat[-1]
+    signal = generate_signal(window)
+
+    # BUY full capital
+    if signal == "buy" and position == 0:
+        qty = (capital * (1 - FEE_RATE)) / price
+        position, entry_px, entry_ts = qty, price, ts
+        capital -= capital * FEE_RATE  # entry fee
+        print(f"[ENTRY] {ts} | qty={qty:.6f} @ {price:.2f} | cash={capital:.2f}")
+
+    # SELL when exit signal & profitable
+    elif signal == "sell" and position > 0 and price > entry_px:
+        proceeds = position * price * (1 - FEE_RATE)
+        pnl_usd  = proceeds - (entry_px * position)
+        capital += proceeds
+        trades.append({
+            "symbol": SYMBOL,
+            "entry_time": entry_ts,
+            "entry_price": entry_px,
+            "exit_time": ts,
+            "exit_price": price,
+            "qty": position,
+            "pnl": pnl_usd,
+        })
+        print(f"[EXIT ] {ts} | pnl={pnl_usd:.2f} | equity={capital:.2f}")
+        position = 0.0
+
+# -- RESULTS --------------------------------------------------------------
+eq_curve = [INIT_CAPITAL]
+for tr in trades: eq_curve.append(eq_curve[-1] + tr["pnl"])
+drawdown = pd.Series(eq_curve).cummax() - eq_curve
+
+print("\n=== BACK-TEST SUMMARY ===")
+print(f"Trades      : {len(trades)}")
+print(f"Net PnL USD : {eq_curve[-1] - INIT_CAPITAL:.2f}")
+print(f"Max DD USD  : {drawdown.max():.2f}")
+print(f"Final Equity: {eq_curve[-1]:.2f}")
+
+# save for Streamlit
+pd.DataFrame(trades).to_csv(CSV_PATH, index=False)
+print(f"Trades exported ? {CSV_PATH}")

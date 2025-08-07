@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+import os
+import sys
+import time
+import logging
+import argparse
+from datetime import datetime
+from functools import wraps
+
+import krakenex
+from dotenv import load_dotenv
+
+from core.data_loader import fetch_ohlc
+from core.strategy import add_indicators, generate_signal
+from core.order_manager import OrderManager
+from core.logger import DBLogger, engine, positions_table
+from core.report import get_monthly_performance
+from utils.pushover import notify
+
+from sentiment.core.scorer import get_fear_greed_score
+from sentiment.core.emotion_logger import log_emotional_snapshot
+from sentiment.core.social_fetcher import fetch_all_emotionals
+
+# --- LOAD CONFIG -----------------------------------------------------------------
+load_dotenv()
+
+SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", "").split(",") if s.strip()]
+FEE_RATE       = float(os.getenv("FEE_RATE", "0.005"))
+ENTRY_BUFFER   = float(os.getenv("ENTRY_BUFFER_ATR", "0.5"))
+ATR_MULTIPLIER = float(os.getenv("ATR_MULTIPLIER", "1.6"))
+RSI_EXIT_THRESHOLD = float(os.getenv("RSI_EXIT_THRESHOLD", "80"))
+
+MIN_FG_SCORE_FOR_ENTRY = int(os.getenv("MIN_FG_SCORE_FOR_ENTRY", "30"))
+DANGER_FG_SCORE_FOR_EXIT = int(os.getenv("DANGER_FG_SCORE_FOR_EXIT", "15"))
+
+BOT_MODE   = os.getenv("BOT_MODE", "dev").lower()
+DRY_RUN    = BOT_MODE == "test"
+DEBUG_MODE = BOT_MODE in ("dev", "test")
+
+# --- LOGGING -----------------------------------------------------------------------
+log_level = logging.DEBUG if DEBUG_MODE else logging.WARNING
+logging.basicConfig(stream=sys.stdout, level=log_level, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
+
+print(f"\n=== Kraken Bot STARTING in {BOT_MODE.upper()} mode ===\n")
+
+# --- CLIENTS & MANAGERS -----------------------------------------------------------
+api = krakenex.API()
+api.key = os.getenv("KRAKEN_API_KEY")
+api.secret = os.getenv("KRAKEN_API_SECRET")
+order_mgr = OrderManager()
+db_logger = DBLogger()
+
+engine = db_logger.engine
+positions_table = db_logger.metadata.tables["positions"]
+
+open_positions = {}
+
+# --- RETRY DECORATOR --------------------------------------------------------------
+def retry(max_retries=3, backoff=5):
+    def deco(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            delay = backoff
+            for attempt in range(1, max_retries+1):
+                try:
+                    return fn(*args, **kwargs)
+                except Exception as e:
+                    logger.warning(f"{fn.__name__} failed ({attempt}/{max_retries}): {e}")
+                    if attempt == max_retries:
+                        raise
+                    time.sleep(delay)
+                    delay *= 2
+        return wrapper
+    return deco
+
+# --- SYNCHRONIZATION --------------------------------------------------------------
+def sync_open_positions():
+    """Load all open positions from DB into memory."""
+    rows = engine.connect().execute(
+        positions_table.select().where(positions_table.c.status == "open")
+    ).mappings().all()
+    for r in rows:
+        open_positions[r["symbol"]] = {
+            "id": r["id"],
+            "entry_price": float(r["entry_price"]),
+            "volume": float(r["volume"]),
+            "trailing_stop": float(r["entry_price"])
+        }
+    print(f"[{datetime.utcnow()}] Synced {len(open_positions)} open positions")
+
+def sync_account_state():
+    """Mirror Kraken open buy orders into DB and in-memory."""
+    resp = api.query_private("OpenOrders")
+    opens = resp.get("result", {}).get("open", {})
+    print(f"[{datetime.utcnow()}] Kraken has {len(opens)} open orders")
+    for txid, order in opens.items():
+        d = order["descr"]
+        pair = d["pair"]
+        side = d["type"]
+        price = float(d["price"])
+        vol = float(order.get("vol", 0))
+        if side == "buy" and pair not in open_positions:
+            pos_id = db_logger.open_position(pair, price, vol, tag=os.getenv("TRADE_TAG", "swing"))
+            open_positions[pair] = {
+                "id": pos_id,
+                "entry_price": price,
+                "volume": vol,
+                "trailing_stop": price
+            }
+            print(f"  • Synced BUY {pair} @ {price:.2f}, vol={vol:.6f}")
+    bal = api.query_private("Balance").get("result", {})
+    print(f"[{datetime.utcnow()}] Account Balances:")
+    for asset, amt in bal.items():
+        print(f"   • {asset}: {float(amt):.6f}")
+
+# --- HELPER ------------------------------------------------------------------------
+def get_available_capital(symbol: str, price: float) -> float:
+    resp = api.query_private("Balance")
+    quote = symbol.split("/")[-1]
+    asset = ("Z" + quote) if len(quote) == 3 else quote
+    bal = float(resp["result"].get(asset, 0))
+    usable = bal * (1 - FEE_RATE)
+    logger.debug(f"Balance {symbol}: {bal:.6f}, usable {usable:.6f}")
+    return usable / price
+
+# --- MAIN TRADING CYCLE ------------------------------------------------------------
+@retry(max_retries=3, backoff=5)
+def execute_trading_cycle():
+    # Fetch emotional scores first
+    fear_greed_score = get_fear_greed_score()
+    emotionals = fetch_all_emotionals()
+
+    print(f"[{datetime.utcnow()}] Fear & Greed Score: {fear_greed_score:.2f}")
+
+    # Log emotions snapshot
+    log_emotional_snapshot(
+        timestamp=datetime.utcnow(),
+        funding_rate=emotionals['funding_rate'],
+        long_short_ratio=emotionals['long_short_ratio'],
+        taker_volume_ratio=emotionals['taker_volume_ratio'],
+        fg_score=fear_greed_score
+    )
+
+    any_action = False
+
+    for symbol in SYMBOLS:
+        now = datetime.utcnow()
+
+        # Fetch 4h indicators
+        try:
+            df4 = fetch_ohlc(symbol, interval=240)
+        except Exception:
+            logger.exception(f"Fetch 4h {symbol} failed")
+            continue
+        df4_ind = add_indicators(df4)
+        last4 = df4_ind.iloc[-1]
+        price = last4["close"]
+        atr = last4["atr"]
+        trend4 = "Bullish" if last4["is_bull"] else "Bearish"
+        signal = generate_signal(df4_ind, fear_greed_score)
+
+        print(
+            f"[{now}] {symbol}  ?  Close: {price:.2f} | ATR: {atr:.2f} | RSI: {last4['rsi']:.2f} | "
+            f"ST: {last4['supertrend']:.2f} ({trend4}) | Signal: {signal or 'None'}"
+        )
+
+        # ?? Forced EXIT if Fear & Greed crash
+        if symbol in open_positions and fear_greed_score < DANGER_FG_SCORE_FOR_EXIT:
+            info = open_positions[symbol]
+            exit_price = price
+            vol = info["volume"]
+            if DRY_RUN:
+                print(f"[DRY-RUN] FORCE EXIT (Danger FG) {symbol} @ {exit_price:.2f}")
+            else:
+                order_mgr.place_limit_order(symbol, "sell", exit_price, vol)
+            db_logger.close_position(info["id"], exit_price)
+            if not DRY_RUN:
+                notify("Force Exit (Low Fear & Greed)", f"{symbol} @ {exit_price:.2f}")
+            open_positions.pop(symbol)
+            any_action = True
+            continue
+
+        # ?? Block New Buys if Fear & Greed too low
+        if fear_greed_score < MIN_FG_SCORE_FOR_ENTRY:
+            continue
+
+        # Regular EXIT: Supertrend flip + RSI > 80
+        if symbol in open_positions:
+            info = open_positions[symbol]
+            entry = info["entry_price"]
+            prev4, curr4 = df4_ind.iloc[-2], df4_ind.iloc[-1]
+
+            st_flip_bear = prev4["is_bull"] and not curr4["is_bull"]
+            if price > entry and st_flip_bear and curr4["rsi"] > RSI_EXIT_THRESHOLD:
+                exit_price = price
+                vol = info["volume"]
+                if DRY_RUN:
+                    print(f"[DRY-RUN] EXIT RSI>80+ST {symbol} @ {exit_price:.2f}")
+                else:
+                    order_mgr.place_limit_order(symbol, "sell", exit_price, vol)
+                db_logger.close_position(info["id"], exit_price)
+                if not DRY_RUN:
+                    notify("Trade Closed (RSI>80+ST)", f"{symbol} @ {exit_price:.2f}")
+                open_positions.pop(symbol)
+                any_action = True
+                continue
+
+        # Entry: Only if signal is buy
+        if signal == "buy" and symbol not in open_positions:
+            entry_price = price - ENTRY_BUFFER * atr
+            volume = get_available_capital(symbol, entry_price)
+            if DRY_RUN:
+                print(f"[DRY-RUN] BUY  {symbol} @ {entry_price:.2f}, vol={volume:.6f}")
+            else:
+                order_mgr.place_limit_order(symbol, "buy", entry_price, volume)
+            pos_id = db_logger.open_position(symbol, entry_price, volume, tag=os.getenv("TRADE_TAG", "swing"))
+            open_positions[symbol] = {
+                "id": pos_id,
+                "entry_price": entry_price,
+                "volume": volume,
+                "trailing_stop": entry_price
+            }
+            if not DRY_RUN:
+                notify("Trade Executed", f"{symbol} @ {entry_price:.2f}")
+            any_action = True
+
+    if not any_action:
+        print(f"[{datetime.utcnow()}] No trades this run.")
+
+# --- MONTHLY REPORT ----------------------------------------------------------------
+def run_monthly_report():
+    try:
+        stats = get_monthly_performance()
+        msg = (
+            f"Total Trades: {stats['total_trades']}\n"
+            f"Win Rate: {stats['win_rate']:.2%}\n"
+            f"Avg Return: {stats['avg_return']:.2%}\n"
+            f"Total PnL: {stats['total_pnl']:.2f}\n"
+            f"Avg Hold: {stats['avg_holding_time']}"
+        )
+        if DRY_RUN:
+            print(f"[DRY-RUN] Monthly Report:\n{msg}")
+        else:
+            notify("Monthly Report", msg)
+    except Exception:
+        logger.exception("Monthly report failed")
+
+# --- ENTRY POINT ------------------------------------------------------------------
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--report", action="store_true", help="Run monthly report only")
+    args = parser.parse_args()
+
+    sync_open_positions()
+    sync_account_state()
+
+    if args.report:
+        run_monthly_report()
+        sys.exit(0)
+
+    try:
+        execute_trading_cycle()
+    except Exception:
+        logger.exception("Trading cycle error")
+        if not DRY_RUN:
+            notify("Bot Crash", "See logs for details")
+        sys.exit(1)
