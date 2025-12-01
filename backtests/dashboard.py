@@ -1,7 +1,7 @@
 import os
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Tuple
 
@@ -210,6 +210,22 @@ def main() -> None:
         step=1_000.0,
         min_value=0.0,
     )
+    interval_minutes = st.sidebar.number_input(
+        "Candle interval (minutes)", value=240, min_value=1, step=15
+    )
+    symbol = st.sidebar.text_input("Symbol", value=os.getenv("BACKTEST_SYMBOL", "BTC/USD"))
+    today = datetime.utcnow().date()
+    default_start = today - timedelta(days=90)
+    date_selection = st.sidebar.date_input(
+        "Backtest window",
+        value=(default_start, today),
+    )
+    if isinstance(date_selection, tuple):
+        start_date, end_date = date_selection
+    else:
+        start_date = end_date = date_selection
+    start_dt = datetime.combine(min(start_date, end_date), datetime.min.time())
+    end_dt = datetime.combine(max(start_date, end_date), datetime.max.time())
     summary_path = Path(st.sidebar.text_input("Summary CSV", value=str(SUMMARY_CSV)))
     ticks_path = Path(st.sidebar.text_input("Ticks CSV", value=str(TICKS_CSV)))
 
@@ -217,8 +233,27 @@ def main() -> None:
         script_path = Path(__file__).parent / "backtest_capital_runner_clean.py"
         logs_dir = script_path.parent / "logs"
 
+        cmd = [
+            sys.executable,
+            script_path.name,
+            "--symbol",
+            symbol,
+            "--start-date",
+            start_dt.isoformat(),
+            "--end-date",
+            end_dt.isoformat(),
+            "--capital",
+            str(default_capital),
+            "--interval-min",
+            str(int(interval_minutes)),
+            "--fee-rate",
+            str(strategy_settings.get("FEE_RATE", 0.005)),
+            "--supertrend-multiplier",
+            str(strategy_settings.get("ATR_MULTIPLIER", 1.6)),
+        ]
+
         result = subprocess.run(
-            [sys.executable, script_path.name],
+            cmd,
             cwd=script_path.parent,
             capture_output=True,
             text=True,
@@ -239,20 +274,6 @@ def main() -> None:
                 st.stop()
 
     summary_df, ticks_df = load_trade_data(summary_path, ticks_path)
-
-    start_bound, end_bound = get_date_bounds(summary_df, ticks_df)
-    date_selection = st.sidebar.date_input(
-        "Backtest window",
-        value=(start_bound.date(), end_bound.date()),
-        min_value=start_bound.date(),
-        max_value=end_bound.date(),
-    )
-    if isinstance(date_selection, tuple):
-        start_date, end_date = date_selection
-    else:
-        start_date = end_date = date_selection
-    start_dt = datetime.combine(min(start_date, end_date), datetime.min.time())
-    end_dt = datetime.combine(max(start_date, end_date), datetime.max.time())
 
     filtered_summary, filtered_ticks = filter_by_date(
         summary_df,
