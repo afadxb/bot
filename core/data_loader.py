@@ -3,6 +3,7 @@ import pandas as pd
 import time
 from datetime import datetime
 from functools import lru_cache
+from typing import Optional
 
 KRAKEN_OHLC_URL = "https://api.kraken.com/0/public/OHLC"
 SYMBOL_LOOKUP = {
@@ -13,7 +14,12 @@ SYMBOL_LOOKUP = {
 }
 
 @lru_cache(maxsize=32)
-def fetch_ohlc(symbol: str, interval: int = 240, lookback: int = 100) -> pd.DataFrame:
+def fetch_ohlc(
+    symbol: str,
+    interval: int = 240,
+    lookback: int = 100,
+    start_time: Optional[datetime] = None,
+) -> pd.DataFrame:
     """
     Fetch OHLC data from Kraken for the given symbol with caching.
 
@@ -21,6 +27,9 @@ def fetch_ohlc(symbol: str, interval: int = 240, lookback: int = 100) -> pd.Data
         symbol (str): Standard symbol format (e.g., BTC/USD)
         interval (int): Timeframe in minutes (default: 4h = 240)
         lookback (int): Minimum number of candles to return
+        start_time (datetime | None): Optional explicit start time for the
+            query. When provided, the Kraken ``since`` parameter is derived
+            from this value so specific historical windows can be requested.
 
     Returns:
         pd.DataFrame: Clean OHLC dataframe with timestamp index
@@ -30,7 +39,10 @@ def fetch_ohlc(symbol: str, interval: int = 240, lookback: int = 100) -> pd.Data
         print(f"[ERROR] Unknown Kraken symbol for {symbol}")
         return pd.DataFrame()
 
-    since = int(time.time()) - (lookback * interval * 60 * 2)  # 2x buffer
+    if start_time:
+        since = int(start_time.timestamp())
+    else:
+        since = int(time.time()) - (lookback * interval * 60 * 2)  # 2x buffer
 
     params = {
         "pair": kraken_symbol,
