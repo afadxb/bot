@@ -31,6 +31,12 @@ SUMMARY_CSV  = "logs/trade_summary.csv"
 
 # ─── DATA ───────────────────────────────────────────────────────────────────
 df = fetch_ohlc(SYMBOL, interval=INTERVAL_MIN)
+
+# ``fetch_ohlc`` returns a timestamp index; normalize to a ``time`` column for
+# the downstream logic and make sure it is a datetime dtype.
+if "time" not in df.columns:
+    df = df.reset_index().rename(columns={df.index.name or "index": "time"})
+
 df["time"] = pd.to_datetime(df["time"])
 needed = int(MONTHS_BACK * 30 * 24 / (INTERVAL_MIN / 60))
 df = df.tail(needed).reset_index(drop=True)
