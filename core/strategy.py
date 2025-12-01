@@ -114,7 +114,10 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     high_close = (df[high_col] - df[close_col].shift()).abs()
     low_close = (df[low_col] - df[close_col].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    atr = tr.rolling(window=period, min_periods=period).mean()
+    # Use a rolling ATR that starts immediately (``min_periods=1``) so early
+    # candles still receive a finite Supertrend value instead of propagating
+    # NaNs through the trend calculation.
+    atr = tr.rolling(window=period, min_periods=1).mean()
     return atr
 
 
