@@ -150,6 +150,11 @@ def generate_signal(df: pd.DataFrame, fear_greed_score: float | None = None) -> 
 
     close_col = "close" if "close" in df.columns else "Close"
 
+    # Require Supertrend to be present before filtering for full candles to
+    # avoid KeyErrors when upstream indicator calculations are incomplete.
+    if "supertrend" not in df.columns:
+        return None
+
     # Require a fully-populated candle (close, supertrend) to avoid emitting
     # signals on the still-forming bar. This also sidesteps transient NaNs in
     # live feeds where the most recent row lacks indicator values.
