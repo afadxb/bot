@@ -114,7 +114,10 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     high_close = (df[high_col] - df[close_col].shift()).abs()
     low_close = (df[low_col] - df[close_col].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    atr = tr.rolling(window=period, min_periods=period).mean()
+    # Use a rolling ATR that starts immediately (``min_periods=1``) so early
+    # candles still receive a finite Supertrend value instead of propagating
+    # NaNs through the trend calculation.
+    atr = tr.rolling(window=period, min_periods=1).mean()
     return atr
 
 
@@ -134,7 +137,7 @@ def generate_signals(df: pd.DataFrame, config: dict) -> pd.DataFrame:
 
 
 def generate_signal(df: pd.DataFrame, fear_greed_score: float | None = None) -> str | None:
-    """Generate a simple trade signal from the most recent row of ``df``.
+    """Generate a simple trade signal from the most recent *closed* candle.
 
     - Buy when the latest close is above Supertrend and RSI is below 70.
     - Sell when the latest close is below Supertrend or RSI rises above 70.
@@ -145,13 +148,24 @@ def generate_signal(df: pd.DataFrame, fear_greed_score: float | None = None) -> 
     if df.empty:
         return None
 
-    last = df.iloc[-1]
-    price = last.get("close") or last.get("Close")
-    supertrend = last.get("supertrend")
-    rsi = last.get("rsi")
+    close_col = "close" if "close" in df.columns else "Close"
 
-    if price is None or pd.isna(price) or supertrend is None or pd.isna(supertrend):
+    # Require Supertrend to be present before filtering for full candles to
+    # avoid KeyErrors when upstream indicator calculations are incomplete.
+    if "supertrend" not in df.columns:
         return None
+
+    # Require a fully-populated candle (close, supertrend) to avoid emitting
+    # signals on the still-forming bar. This also sidesteps transient NaNs in
+    # live feeds where the most recent row lacks indicator values.
+    valid_rows = df.dropna(subset=[close_col, "supertrend"])
+    if valid_rows.empty:
+        return None
+
+    last = valid_rows.iloc[-1]
+    price = last[close_col]
+    supertrend = last["supertrend"]
+    rsi = last.get("rsi")
 
     if rsi is None or pd.isna(rsi):
         rsi = 50
