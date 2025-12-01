@@ -1,4 +1,6 @@
 import os
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Tuple
@@ -204,6 +206,31 @@ def main() -> None:
     )
     summary_path = Path(st.sidebar.text_input("Summary CSV", value=str(SUMMARY_CSV)))
     ticks_path = Path(st.sidebar.text_input("Ticks CSV", value=str(TICKS_CSV)))
+
+    def run_backtest() -> Tuple[Path, Path]:
+        script_path = Path(__file__).parent / "backtest_capital_runner_clean.py"
+        logs_dir = script_path.parent / "logs"
+
+        result = subprocess.run(
+            [sys.executable, script_path.name],
+            cwd=script_path.parent,
+            capture_output=True,
+            text=True,
+        )
+
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "Backtest script failed")
+
+        return logs_dir / "trade_summary.csv", logs_dir / "trade_ticks.csv"
+
+    if st.sidebar.button("Re-run backtest", help="Generate fresh summary and tick logs using the latest data"):
+        with st.spinner("Running backtest. This may take a moment..."):
+            try:
+                summary_path, ticks_path = run_backtest()
+                st.success("Backtest complete. Logs refreshed.")
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Failed to run backtest: {exc}")
+                st.stop()
 
     summary_df, ticks_df = load_trade_data(summary_path, ticks_path)
 
