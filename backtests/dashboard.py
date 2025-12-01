@@ -1,8 +1,11 @@
+import os
+from datetime import datetime
 from pathlib import Path
-from typing import Tuple
+from typing import Dict, Tuple
 
 import pandas as pd
 import plotly.express as px
+from dotenv import load_dotenv
 import streamlit as st
 
 st.set_page_config(layout="wide", page_title="Backtest Dashboard")
@@ -11,6 +14,25 @@ LOG_DIR = Path(__file__).parent / "logs"
 SUMMARY_CSV = LOG_DIR / "trade_summary.csv"
 TICKS_CSV = LOG_DIR / "trade_ticks.csv"
 DEFAULT_CAPITAL = 10_000.0
+
+
+def load_strategy_settings() -> Dict[str, float]:
+    """Read strategy-related settings from environment variables.
+
+    Uses the same defaults as ``main.py`` so the dashboard reflects the
+    currently configured trading posture without requiring manual entry.
+    """
+
+    load_dotenv()
+
+    return {
+        "FEE_RATE": float(os.getenv("FEE_RATE", 0.005)),
+        "ENTRY_BUFFER": float(os.getenv("ENTRY_BUFFER", 0.001)),
+        "ATR_MULTIPLIER": float(os.getenv("ATR_MULTIPLIER", 1.6)),
+        "RSI_EXIT_THRESHOLD": float(os.getenv("RSI_EXIT_THRESHOLD", 80)),
+        "MIN_FG_SCORE_FOR_ENTRY": int(os.getenv("MIN_FG_SCORE_FOR_ENTRY", 30)),
+        "DANGER_FG_SCORE_FOR_EXIT": int(os.environ.get("DANGER_FG_SCORE_FOR_EXIT", 15)),
+    }
 
 
 def load_trade_data(summary_path: Path, ticks_path: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -23,6 +45,46 @@ def load_trade_data(summary_path: Path, ticks_path: Path) -> Tuple[pd.DataFrame,
 
     if ticks_path.exists():
         ticks_df = pd.read_csv(ticks_path, parse_dates=["timestamp"])
+
+    return summary_df, ticks_df
+
+
+def get_date_bounds(summary_df: pd.DataFrame, ticks_df: pd.DataFrame) -> Tuple[datetime, datetime]:
+    """Return the min and max timestamps present across summary and tick data."""
+
+    series = []
+    for col in ("entry_time", "exit_time"):
+        if col in summary_df:
+            series.append(summary_df[col])
+
+    if "timestamp" in ticks_df:
+        series.append(ticks_df["timestamp"])
+
+    if not series:
+        now = datetime.utcnow()
+        return now, now
+
+    combined = pd.concat(series)
+    return combined.min().to_pydatetime(), combined.max().to_pydatetime()
+
+
+def filter_by_date(
+    summary_df: pd.DataFrame,
+    ticks_df: pd.DataFrame,
+    start: datetime,
+    end: datetime,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Filter both datasets to the selected date range."""
+
+    if not summary_df.empty:
+        summary_df = summary_df[
+            (summary_df["entry_time"] >= start) & (summary_df["exit_time"] <= end)
+        ]
+
+    if not ticks_df.empty:
+        ticks_df = ticks_df[
+            (ticks_df["timestamp"] >= start) & (ticks_df["timestamp"] <= end)
+        ]
 
     return summary_df, ticks_df
 
@@ -132,22 +194,53 @@ def main() -> None:
         "Use the back-test scripts to refresh `backtests/logs/trade_summary.csv` and `trade_ticks.csv`, then visualize the results here."
     )
 
-    default_capital = st.sidebar.number_input("Starting capital", value=DEFAULT_CAPITAL, step=1_000.0, min_value=0.0)
+    strategy_settings = load_strategy_settings()
+
+    default_capital = st.sidebar.number_input(
+        "Starting capital",
+        value=float(os.getenv("INIT_CAPITAL", DEFAULT_CAPITAL)),
+        step=1_000.0,
+        min_value=0.0,
+    )
     summary_path = Path(st.sidebar.text_input("Summary CSV", value=str(SUMMARY_CSV)))
     ticks_path = Path(st.sidebar.text_input("Ticks CSV", value=str(TICKS_CSV)))
 
     summary_df, ticks_df = load_trade_data(summary_path, ticks_path)
 
-    render_metrics(summary_df, default_capital)
-    render_equity_charts(equity_curve(summary_df, default_capital))
+    start_bound, end_bound = get_date_bounds(summary_df, ticks_df)
+    date_selection = st.sidebar.date_input(
+        "Backtest window",
+        value=(start_bound.date(), end_bound.date()),
+        min_value=start_bound.date(),
+        max_value=end_bound.date(),
+    )
+    if isinstance(date_selection, tuple):
+        start_date, end_date = date_selection
+    else:
+        start_date = end_date = date_selection
+    start_dt = datetime.combine(min(start_date, end_date), datetime.min.time())
+    end_dt = datetime.combine(max(start_date, end_date), datetime.max.time())
+
+    filtered_summary, filtered_ticks = filter_by_date(
+        summary_df,
+        ticks_df,
+        start_dt,
+        end_dt,
+    )
+
+    with st.sidebar.expander("Strategy settings in use", expanded=False):
+        st.json(strategy_settings)
+
+    render_metrics(filtered_summary, default_capital)
+    render_equity_charts(equity_curve(filtered_summary, default_capital))
 
     col1, col2 = st.columns([2, 1])
     with col1:
-        render_trades_table(summary_df)
+        render_trades_table(filtered_summary)
     with col2:
-        render_distribution(summary_df)
+        render_distribution(filtered_summary)
 
-    render_price_marks(ticks_df)
+    render_price_marks(filtered_ticks)
 
 
 if __name__ == "__main__":
