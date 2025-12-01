@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Any
+from typing import Any, Dict
 
 
 @dataclass
@@ -10,12 +10,14 @@ class OrderManager:
 
     The real project integrates with the Kraken API, but the tests only need a
     lightweight object that stores the provided configuration and exposes a
-    ``place_limit_order`` method.
+    ``place_limit_order`` method. The configuration is optional so production
+    scripts can instantiate the manager without parameters.
     """
 
-    config: Dict[str, Any]
+    config: Dict[str, Any] | None = None
 
     def __post_init__(self) -> None:  # pragma: no cover - trivial
+        self.config = self.config or {}
         self.last_order: Dict[str, Any] | None = None
 
     def place_limit_order(self, symbol: str, side: str, price: float, volume: float) -> Dict[str, Any]:
