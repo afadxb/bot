@@ -20,17 +20,17 @@ def add_indicators(
 
     if "Close" in result.columns:
         close_col = "Close"
-    else:
+    elif "close" in result.columns:
         close_col = "close"
-
-    if close_col not in result:
+    else:
         return result
 
     result["rsi"] = calculate_rsi(result[close_col], period=rsi_period)
 
-    if {"High", "Low", close_col}.issubset(result.columns):
-        high_col = "High" if "High" in result.columns else "high"
-        low_col = "Low" if "Low" in result.columns else "low"
+    high_col = "High" if "High" in result.columns else "high" if "high" in result.columns else None
+    low_col = "Low" if "Low" in result.columns else "low" if "low" in result.columns else None
+
+    if high_col and low_col:
 
         price_df = result.rename(columns={
             high_col: "high",
