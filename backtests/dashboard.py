@@ -43,10 +43,16 @@ def load_trade_data(summary_path: Path, ticks_path: Path) -> Tuple[pd.DataFrame,
     ticks_df = pd.DataFrame()
 
     if summary_path.exists():
-        summary_df = pd.read_csv(summary_path, parse_dates=["entry_time", "exit_time"])
+        try:
+            summary_df = pd.read_csv(summary_path, parse_dates=["entry_time", "exit_time"])
+        except pd.errors.EmptyDataError:
+            st.warning(f"Summary file {summary_path} is empty; no trades to show.")
 
     if ticks_path.exists():
-        ticks_df = pd.read_csv(ticks_path, parse_dates=["timestamp"])
+        try:
+            ticks_df = pd.read_csv(ticks_path, parse_dates=["timestamp"])
+        except pd.errors.EmptyDataError:
+            st.warning(f"Tick file {ticks_path} is empty; no markers to show.")
 
     return summary_df, ticks_df
 
