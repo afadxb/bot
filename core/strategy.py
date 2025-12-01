@@ -137,7 +137,7 @@ def generate_signals(df: pd.DataFrame, config: dict) -> pd.DataFrame:
 
 
 def generate_signal(df: pd.DataFrame, fear_greed_score: float | None = None) -> str | None:
-    """Generate a simple trade signal from the most recent row of ``df``.
+    """Generate a simple trade signal from the most recent *closed* candle.
 
     - Buy when the latest close is above Supertrend and RSI is below 70.
     - Sell when the latest close is below Supertrend or RSI rises above 70.
@@ -148,13 +148,19 @@ def generate_signal(df: pd.DataFrame, fear_greed_score: float | None = None) -> 
     if df.empty:
         return None
 
-    last = df.iloc[-1]
-    price = last.get("close") or last.get("Close")
-    supertrend = last.get("supertrend")
-    rsi = last.get("rsi")
+    close_col = "close" if "close" in df.columns else "Close"
 
-    if price is None or pd.isna(price) or supertrend is None or pd.isna(supertrend):
+    # Require a fully-populated candle (close, supertrend) to avoid emitting
+    # signals on the still-forming bar. This also sidesteps transient NaNs in
+    # live feeds where the most recent row lacks indicator values.
+    valid_rows = df.dropna(subset=[close_col, "supertrend"])
+    if valid_rows.empty:
         return None
+
+    last = valid_rows.iloc[-1]
+    price = last[close_col]
+    supertrend = last["supertrend"]
+    rsi = last.get("rsi")
 
     if rsi is None or pd.isna(rsi):
         rsi = 50
