@@ -59,6 +59,7 @@ engine = db_logger.engine
 positions_table = db_logger.metadata.tables["positions"]
 
 open_positions = {}
+last_trends = {}
 
 # --- RETRY DECORATOR --------------------------------------------------------------
 def retry(max_retries=3, backoff=5):
@@ -172,6 +173,7 @@ def execute_trading_cycle():
 
         for symbol in SYMBOLS:
             now = datetime.utcnow()
+            trend_val = None
             try:
                 df4 = fetch_ohlc(symbol, interval=240, lookback=60)
                 if df4.empty:
@@ -190,6 +192,11 @@ def execute_trading_cycle():
                 trend_val = last4.get("trend", 0)
                 atr = last4.get("atr", 0.0)
                 trend4 = "Bullish" if trend_val == 1 else "Bearish"
+
+                prev_trend = last_trends.get(
+                    symbol,
+                    df4_ind["trend"].iloc[-2] if len(df4_ind) > 1 else trend_val,
+                )
 
                 signal = generate_signal(df4_ind, fear_greed_score)
                 rsi_print = f"{rsi:.2f}" if pd.notna(rsi) else "NaN"
@@ -231,8 +238,7 @@ def execute_trading_cycle():
 
                 # --- BUY Entry (on Supertrend flip only) ---
                 if signal == "buy" and symbol not in open_positions:
-                    prev_trend = df4_ind["trend"].iloc[-2]
-                    curr_trend = df4_ind["trend"].iloc[-1]
+                    curr_trend = trend_val
                     just_flipped = (prev_trend == -1 and curr_trend == 1)
 
                     if just_flipped:
@@ -263,6 +269,9 @@ def execute_trading_cycle():
                         print(f"[{symbol}] Skipped buy - trend did not flip.")
             except Exception as e:
                 logger.error(f"Trading cycle failed for {symbol}: {e}")
+            finally:
+                if "trend_val" in locals():
+                    last_trends[symbol] = trend_val
 
         if not any_action:
             logger.info("No trading actions taken in this cycle.")
