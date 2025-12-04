@@ -35,8 +35,6 @@ DANGER_FG_SCORE_FOR_EXIT = int(os.environ.get("DANGER_FG_SCORE_FOR_EXIT", 15))
 BOT_MODE = os.getenv("BOT_MODE", "dev").lower()
 DRY_RUN = BOT_MODE == "test"
 DEBUG_MODE = BOT_MODE in ("dev", "test")
-CACHE_INTERVAL = 240
-CACHE_LOOKBACK = 60
 
 # --- LOGGING -----------------------------------------------------------------------
 log_level = logging.DEBUG if DEBUG_MODE else logging.WARNING
@@ -62,7 +60,6 @@ positions_table = db_logger.metadata.tables["positions"]
 
 open_positions = {}
 last_trends = {}
-market_data_cache: dict[str, pd.DataFrame] = {}
 
 # --- RETRY DECORATOR --------------------------------------------------------------
 def retry(max_retries=3, backoff=5):
@@ -143,21 +140,6 @@ def get_available_capital(symbol: str, price: float) -> float:
         logger.error(f"Failed to get available capital for {symbol}: {e}")
         return 0
 
-
-def load_market_data_cache_from_db() -> None:
-    """Warm the in-memory cache using persisted OHLC data."""
-
-    for symbol in SYMBOLS:
-        try:
-            cached_df = db_logger.get_cached_market_data(
-                symbol, CACHE_INTERVAL, CACHE_LOOKBACK
-            )
-            if cached_df is not None and not cached_df.empty:
-                market_data_cache[symbol] = cached_df
-                logger.debug(f"Loaded cached market data for {symbol} from SQLite")
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(f"Unable to warm cache for {symbol}: {exc}")
-
 # --- MAIN TRADING CYCLE ------------------------------------------------------------
 @retry(max_retries=3, backoff=5)
 def execute_trading_cycle():
@@ -193,35 +175,10 @@ def execute_trading_cycle():
             now = datetime.utcnow()
             trend_val = None
             try:
-                df4 = market_data_cache.get(symbol)
-                if df4 is not None and not df4.empty:
-                    logger.debug(f"Using cached market data for {symbol}")
-                else:
-                    db_cached = db_logger.get_cached_market_data(
-                        symbol, CACHE_INTERVAL, CACHE_LOOKBACK
-                    )
-                    if db_cached is not None and not db_cached.empty:
-                        df4 = db_cached
-                        market_data_cache[symbol] = db_cached
-                        logger.debug(f"Using SQLite cached market data for {symbol}")
-
-                if df4 is None or df4.empty:
-                    df4 = fetch_ohlc(symbol, interval=CACHE_INTERVAL, lookback=CACHE_LOOKBACK)
-                    if df4.empty:
-                        logger.warning(f"No data for {symbol}")
-                        continue
-                    market_data_cache[symbol] = df4
-                    db_logger.upsert_market_data_cache(
-                        symbol, CACHE_INTERVAL, CACHE_LOOKBACK, df4
-                    )
-
-                refreshed_df = fetch_ohlc(symbol, interval=CACHE_INTERVAL, lookback=CACHE_LOOKBACK)
-                if not refreshed_df.empty:
-                    market_data_cache[symbol] = refreshed_df
-                    db_logger.upsert_market_data_cache(
-                        symbol, CACHE_INTERVAL, CACHE_LOOKBACK, refreshed_df
-                    )
-                    df4 = refreshed_df
+                df4 = fetch_ohlc(symbol, interval=240, lookback=60)
+                if df4.empty:
+                    logger.warning(f"No data for {symbol}")
+                    continue
 
                 df4_ind = add_indicators(df4)
                 if df4_ind.empty:
@@ -351,7 +308,6 @@ if __name__ == "__main__":
 
     sync_open_positions()
     sync_account_state()
-    load_market_data_cache_from_db()
 
     if args.report:
         run_monthly_report()

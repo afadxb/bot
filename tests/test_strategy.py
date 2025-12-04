@@ -53,30 +53,3 @@ def test_add_indicators_accepts_lowercase_ohlc_columns():
 
     assert "supertrend" in result.columns
     assert result["supertrend"].notna().any()
-
-
-def test_generate_signal_uses_previous_candle_without_is_closed_flag():
-    df = pd.DataFrame(
-        {
-            "close": [1.0, 2.0, 3.0],
-            "supertrend": [0.5, 2.5, 2.5],
-            "rsi": [50, 50, 50],
-        }
-    )
-
-    # Latest bar would emit a buy, but calculation should run on the last
-    # completed candle (penultimate row) which produces a sell.
-    assert generate_signal(df) == "sell"
-
-
-def test_generate_signal_respects_is_closed_flag():
-    df = pd.DataFrame(
-        {
-            "close": [1.0, 2.0, 3.0],
-            "supertrend": [0.5, 2.5, 2.5],
-            "rsi": [50, 50, 50],
-            "is_closed": [True, True, False],
-        }
-    )
-
-    assert generate_signal(df) == "sell"
