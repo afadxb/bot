@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+import json
+import pandas as pd
 from sqlalchemy import (
     DECIMAL,
     Column,
@@ -17,9 +19,11 @@ from sqlalchemy import (
     String,
     Table,
     create_engine,
+    delete,
     select,
 )
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.sql import desc
 
 # --- File-based logger -----------------------------------------------------------
 
@@ -109,6 +113,18 @@ class DBLogger:
             extend_existing=True,
         )
 
+        self.market_data_cache = Table(
+            "market_data_cache",
+            self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("symbol", String(20), nullable=False),
+            Column("interval", Integer, nullable=False),
+            Column("lookback", Integer, nullable=False),
+            Column("data_json", String, nullable=False),
+            Column("fetched_at", DateTime, default=datetime.utcnow),
+            extend_existing=True,
+        )
+
         self.metadata.create_all(self.engine)
         # Reflect in case additional tables exist outside the ones defined
         self.metadata.reflect(bind=self.engine, extend_existing=True)
@@ -190,6 +206,64 @@ class DBLogger:
                     asset=asset,
                     balance=balance,
                     timestamp=datetime.utcnow(),
+                )
+            )
+
+    # --- Market data cache ----------------------------------------------------
+    def get_cached_market_data(
+        self, symbol: str, interval: int, lookback: int
+    ) -> pd.DataFrame | None:
+        """Return cached OHLC data for ``symbol`` if present."""
+
+        with self.engine.connect() as conn:
+            row = (
+                conn.execute(
+                    select(self.market_data_cache)
+                    .where(
+                        (self.market_data_cache.c.symbol == symbol)
+                        & (self.market_data_cache.c.interval == interval)
+                        & (self.market_data_cache.c.lookback == lookback)
+                    )
+                    .order_by(desc(self.market_data_cache.c.fetched_at))
+                )
+                .mappings()
+                .first()
+            )
+
+        if not row:
+            return None
+
+        try:
+            records = json.loads(row["data_json"])
+            return pd.DataFrame.from_records(records)
+        except Exception:
+            return None
+
+    def upsert_market_data_cache(
+        self, symbol: str, interval: int, lookback: int, df: pd.DataFrame
+    ) -> None:
+        """Persist ``df`` as the latest cached market data for ``symbol``."""
+
+        if df is None or df.empty:
+            return
+
+        payload = df.to_dict(orient="records")
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                delete(self.market_data_cache).where(
+                    (self.market_data_cache.c.symbol == symbol)
+                    & (self.market_data_cache.c.interval == interval)
+                    & (self.market_data_cache.c.lookback == lookback)
+                )
+            )
+            conn.execute(
+                self.market_data_cache.insert().values(
+                    symbol=symbol,
+                    interval=interval,
+                    lookback=lookback,
+                    data_json=json.dumps(payload),
+                    fetched_at=datetime.utcnow(),
                 )
             )
 

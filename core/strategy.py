@@ -162,7 +162,18 @@ def generate_signal(df: pd.DataFrame, fear_greed_score: float | None = None) -> 
     if valid_rows.empty:
         return None
 
-    last = valid_rows.iloc[-1]
+    # Always evaluate signals on the last *closed* bar. When no explicit
+    # ``is_closed`` flag is present, fall back to the penultimate candle to
+    # avoid acting on a still-forming bar that happens to contain indicator
+    # values. If a feed provides ``is_closed``, respect it so historical data
+    # sets continue to use their true latest candle.
+    if "is_closed" in valid_rows.columns:
+        closed_rows = valid_rows[valid_rows["is_closed"].astype(bool)]
+        if closed_rows.empty:
+            return None
+        last = closed_rows.iloc[-1]
+    else:
+        last = valid_rows.iloc[-2] if len(valid_rows) > 1 else valid_rows.iloc[-1]
     price = last[close_col]
     supertrend = last["supertrend"]
     rsi = last.get("rsi")
