@@ -1,6 +1,5 @@
 __pycache__/
 *.py[cod]
 logs/
-.venv/
 trading.db
 .pytest_cache/
