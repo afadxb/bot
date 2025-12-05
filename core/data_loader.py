@@ -99,10 +99,10 @@ def fetch_ohlc(
 
         trimmed = df.tail(lookback)
         enriched = add_indicators(trimmed)
-        signal = generate_signal(enriched, on_bar_close=True)
+        signal, signal_ts = generate_signal(enriched, on_bar_close=True, return_row=True)
         enriched["signal"] = None
-        if signal:
-            enriched.loc[enriched.index[-1], "signal"] = signal
+        if signal and signal_ts is not None and signal_ts in enriched.index:
+            enriched.loc[signal_ts, "signal"] = signal
 
         _db_logger.cache_market_data(symbol, interval, enriched)
         return enriched.tail(lookback)

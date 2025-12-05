@@ -140,7 +140,8 @@ def generate_signal(
     df: pd.DataFrame,
     fear_greed_score: float | None = None,
     on_bar_close: bool = True,
-) -> str | None:
+    return_row: bool = False,
+) -> str | tuple[str | None, pd.Timestamp | None] | None:
     """Generate a simple trade signal from the most recent *closed* candle.
 
     - Buy when the latest close is above Supertrend and RSI is below 70.
@@ -150,24 +151,28 @@ def generate_signal(
     ``on_bar_close`` forces the function to use the last fully-formed candle
     (the penultimate row when at least two valid rows exist) so decisions are
     not based on an in-progress bar.
+    If ``return_row`` is ``True``, the function returns a tuple of
+    ``(signal, timestamp)`` so callers can align the signal with the exact
+    candle used for the decision. Otherwise a bare string (or ``None``) is
+    returned for backward compatibility.
     """
 
     if df.empty:
-        return None
+        return None if not return_row else (None, None)
 
     close_col = "close" if "close" in df.columns else "Close"
 
     # Require Supertrend to be present before filtering for full candles to
     # avoid KeyErrors when upstream indicator calculations are incomplete.
     if "supertrend" not in df.columns:
-        return None
+        return None if not return_row else (None, None)
 
     # Require a fully-populated candle (close, supertrend) to avoid emitting
     # signals on the still-forming bar. This also sidesteps transient NaNs in
     # live feeds where the most recent row lacks indicator values.
     valid_rows = df.dropna(subset=[close_col, "supertrend"])
     if valid_rows.empty:
-        return None
+        return None if not return_row else (None, None)
 
     if on_bar_close and len(valid_rows) > 1:
         target_row = valid_rows.iloc[-2]
@@ -182,11 +187,15 @@ def generate_signal(
         rsi = 50
 
     if fear_greed_score is not None and fear_greed_score < 20:
-        return None
+        return None if not return_row else (None, target_row.name)
 
     if price > supertrend and rsi < 70:
-        return "buy"
-    if price < supertrend or rsi > 70:
-        return "sell"
+        result = "buy"
+    elif price < supertrend or rsi > 70:
+        result = "sell"
+    else:
+        result = None
 
-    return None
+    if return_row:
+        return result, target_row.name
+    return result
