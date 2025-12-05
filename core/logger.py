@@ -233,7 +233,14 @@ class DBLogger:
 
         df = pd.DataFrame(rows)
         df.set_index("timestamp", inplace=True)
-        return df[["open", "high", "low", "close", "volume"]].sort_index()
+
+        # SQLAlchemy returns ``Decimal`` objects for ``DECIMAL`` columns. Cast
+        # them to native floats so downstream indicator math (which mixes
+        # numpy/pandas float dtypes) does not trigger ``Decimal`` type errors.
+        numeric_cols = ["open", "high", "low", "close", "volume"]
+        df[numeric_cols] = df[numeric_cols].astype(float)
+
+        return df[numeric_cols].sort_index()
 
     def cache_market_data(self, symbol: str, interval: int, df: pd.DataFrame) -> None:
         """Persist OHLC data and prune any cache older than two years."""
