@@ -32,6 +32,8 @@ ATR_MULTIPLIER = float(os.getenv("ATR_MULTIPLIER", 1.6))
 RSI_EXIT_THRESHOLD = float(os.getenv("RSI_EXIT_THRESHOLD", 80))
 MIN_FG_SCORE_FOR_ENTRY = int(os.getenv("MIN_FG_SCORE_FOR_ENTRY", 30))
 DANGER_FG_SCORE_FOR_EXIT = int(os.environ.get("DANGER_FG_SCORE_FOR_EXIT", 15))
+DEFAULT_TIMEFRAME_MINUTES = int(os.getenv("DEFAULT_TIMEFRAME_MINUTES", 240))
+RAW_TIMEFRAMES = os.getenv("TIMEFRAMES", "")
 BOT_MODE = os.getenv("BOT_MODE", "dev").lower()
 DRY_RUN = BOT_MODE == "test"
 DEBUG_MODE = BOT_MODE in ("dev", "test")
@@ -45,6 +47,25 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger(__name__)
+
+
+def parse_timeframes(raw: str) -> dict[str, int]:
+    mapping: dict[str, int] = {}
+    if not raw:
+        return mapping
+
+    for entry in raw.split(","):
+        if not entry or ":" not in entry:
+            continue
+        symbol, minutes = entry.split(":", 1)
+        try:
+            mapping[symbol.strip()] = int(minutes)
+        except ValueError:
+            logger.warning(f"Invalid timeframe entry '{entry}' in TIMEFRAMES; expected SYMBOL:MINUTES")
+    return mapping
+
+
+SYMBOL_TIMEFRAMES = parse_timeframes(RAW_TIMEFRAMES)
 
 print(f"\n=== Kraken Bot STARTING in {BOT_MODE.upper()} mode ===\n")
 
@@ -175,7 +196,8 @@ def execute_trading_cycle():
             now = datetime.utcnow()
             trend_val = None
             try:
-                df4 = fetch_ohlc(symbol, interval=240, lookback=60)
+                interval_minutes = SYMBOL_TIMEFRAMES.get(symbol, DEFAULT_TIMEFRAME_MINUTES)
+                df4 = fetch_ohlc(symbol, interval=interval_minutes, lookback=60)
                 if df4.empty:
                     logger.warning(f"No data for {symbol}")
                     continue

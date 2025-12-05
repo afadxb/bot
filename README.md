@@ -46,6 +46,10 @@ backed by MySQL for visualization.
 ### Trading bot
 - `KRAKEN_API_KEY` / `KRAKEN_API_SECRET`: API credentials for Kraken access.【F:main.py†L51-L55】
 - `SYMBOLS`: Comma-separated trading pairs (e.g., `BTC/USD,ETH/USD`).【F:main.py†L28-L35】
+- `DEFAULT_TIMEFRAME_MINUTES`: Target candle size (in minutes) to resample 1h Kraken data for any
+  symbol without an explicit override (default: 240).【F:main.py†L28-L40】【F:core/data_loader.py†L9-L85】
+- `TIMEFRAMES`: Optional comma-separated overrides in the form `SYMBOL:MINUTES` (e.g.,
+  `BTC/USD:240,ETH/USD:120`) to resample the hourly history differently per pair.【F:main.py†L28-L57】【F:core/data_loader.py†L9-L85】
 - Risk and signal tuning parameters: `FEE_RATE`, `ENTRY_BUFFER`,
   `ATR_MULTIPLIER`, `RSI_EXIT_THRESHOLD`, `MIN_FG_SCORE_FOR_ENTRY`,
   `DANGER_FG_SCORE_FOR_EXIT`.【F:main.py†L28-L34】
