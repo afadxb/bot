@@ -3,10 +3,11 @@ from __future__ import annotations
 import csv
 import os
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
+import pandas as pd
 from sqlalchemy import (
     DECIMAL,
     Column,
@@ -16,6 +17,7 @@ from sqlalchemy import (
     MetaData,
     String,
     Table,
+    UniqueConstraint,
     create_engine,
     select,
 )
@@ -109,6 +111,22 @@ class DBLogger:
             extend_existing=True,
         )
 
+        self.market_data = Table(
+            "market_data",
+            self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("symbol", String(20), nullable=False),
+            Column("interval", Integer, nullable=False),
+            Column("timestamp", DateTime, nullable=False),
+            Column("open", DECIMAL(18, 8), nullable=False),
+            Column("high", DECIMAL(18, 8), nullable=False),
+            Column("low", DECIMAL(18, 8), nullable=False),
+            Column("close", DECIMAL(18, 8), nullable=False),
+            Column("volume", DECIMAL(28, 8), nullable=False),
+            UniqueConstraint("symbol", "interval", "timestamp", name="uq_market_data"),
+            extend_existing=True,
+        )
+
         self.metadata.create_all(self.engine)
         # Reflect in case additional tables exist outside the ones defined
         self.metadata.reflect(bind=self.engine, extend_existing=True)
@@ -192,6 +210,76 @@ class DBLogger:
                     timestamp=datetime.utcnow(),
                 )
             )
+
+    # --- Market data cache helpers -------------------------------------------
+    def get_market_data(self, symbol: str, interval: int, start_time: datetime) -> pd.DataFrame:
+        """Return cached OHLC rows newer than ``start_time``."""
+
+        query = (
+            select(self.market_data)
+            .where(
+                (self.market_data.c.symbol == symbol)
+                & (self.market_data.c.interval == interval)
+                & (self.market_data.c.timestamp >= start_time)
+            )
+            .order_by(self.market_data.c.timestamp)
+        )
+
+        with self.engine.connect() as conn:
+            rows = conn.execute(query).mappings().all()
+
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows)
+        df.set_index("timestamp", inplace=True)
+
+        # SQLAlchemy returns ``Decimal`` objects for ``DECIMAL`` columns. Cast
+        # them to native floats so downstream indicator math (which mixes
+        # numpy/pandas float dtypes) does not trigger ``Decimal`` type errors.
+        numeric_cols = ["open", "high", "low", "close", "volume"]
+        df[numeric_cols] = df[numeric_cols].astype(float)
+
+        return df[numeric_cols].sort_index()
+
+    def cache_market_data(self, symbol: str, interval: int, df: pd.DataFrame) -> None:
+        """Persist OHLC data and prune any cache older than two years."""
+
+        if df.empty:
+            return
+
+        cutoff = datetime.utcnow() - timedelta(days=365 * 2)
+        df = df.sort_index()
+
+        records = [
+            {
+                "symbol": symbol,
+                "interval": interval,
+                "timestamp": ts.to_pydatetime(),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row["volume"]),
+            }
+            for ts, row in df.iterrows()
+        ]
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                self.market_data.delete().where(self.market_data.c.timestamp < cutoff)
+            )
+
+            conn.execute(
+                self.market_data.delete().where(
+                    (self.market_data.c.symbol == symbol)
+                    & (self.market_data.c.interval == interval)
+                    & (self.market_data.c.timestamp >= records[0]["timestamp"])
+                    & (self.market_data.c.timestamp <= records[-1]["timestamp"])
+                )
+            )
+
+            conn.execute(self.market_data.insert(), records)
 
 
 # Convenience exports for modules that import the engine/table directly

@@ -1,9 +1,11 @@
 import requests
 import pandas as pd
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import lru_cache
 from typing import Optional
+
+from core.logger import DBLogger
 
 KRAKEN_OHLC_URL = "https://api.kraken.com/0/public/OHLC"
 SYMBOL_LOOKUP = {
@@ -12,6 +14,8 @@ SYMBOL_LOOKUP = {
     "USD/CAD": "ZUSDZCAD",
     "ETH/BTC": "ETHXBT"
 }
+
+_db_logger = DBLogger()
 
 @lru_cache(maxsize=32)
 def fetch_ohlc(
@@ -38,6 +42,11 @@ def fetch_ohlc(
     if not kraken_symbol:
         print(f"[ERROR] Unknown Kraken symbol for {symbol}")
         return pd.DataFrame()
+
+    cache_start = start_time or datetime.utcnow() - timedelta(minutes=interval * lookback * 2)
+    cached_df = _db_logger.get_market_data(symbol, interval, cache_start)
+    if not cached_df.empty and len(cached_df) >= lookback:
+        return cached_df.tail(lookback)
 
     if start_time:
         since = int(start_time.timestamp())
@@ -87,7 +96,9 @@ def fetch_ohlc(
             print(f"[WARNING] Only {len(df)} candles returned for {symbol} (expected {lookback})")
             raise ValueError(f"Insufficient data for {symbol}")
 
-        return df.tail(lookback)
+        trimmed = df.tail(lookback)
+        _db_logger.cache_market_data(symbol, interval, trimmed)
+        return trimmed
 
     except requests.exceptions.RequestException as e:
         print(f"[NETWORK ERROR] Failed to fetch OHLC for {symbol}: {str(e)}")
