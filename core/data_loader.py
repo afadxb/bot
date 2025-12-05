@@ -7,6 +7,7 @@ from functools import lru_cache
 from typing import Optional
 
 from core.logger import DBLogger
+from core.strategy import add_indicators, generate_signal
 
 KRAKEN_OHLC_URL = "https://api.kraken.com/0/public/OHLC"
 SYMBOL_LOOKUP = {
@@ -118,8 +119,18 @@ def fetch_ohlc(
             raise ValueError(f"Insufficient data for {symbol}")
 
         trimmed = df.tail(lookback)
-        _db_logger.cache_market_data(symbol, target_interval, trimmed)
-        return trimmed
+
+        enriched = add_indicators(trimmed.reset_index())
+        enriched.set_index("timestamp", inplace=True)
+
+        signals = []
+        for i in range(len(enriched)):
+            window = enriched.iloc[: i + 1]
+            signals.append(generate_signal(window, on_bar_close=False))
+        enriched["signal"] = signals
+
+        _db_logger.cache_market_data(symbol, target_interval, enriched)
+        return enriched
 
     except requests.exceptions.RequestException as e:
         print(f"[NETWORK ERROR] Failed to fetch OHLC for {symbol}: {str(e)}")

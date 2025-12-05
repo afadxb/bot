@@ -123,6 +123,11 @@ class DBLogger:
             Column("low", DECIMAL(18, 8), nullable=False),
             Column("close", DECIMAL(18, 8), nullable=False),
             Column("volume", DECIMAL(28, 8), nullable=False),
+            Column("rsi", DECIMAL(18, 8)),
+            Column("atr", DECIMAL(18, 8)),
+            Column("supertrend", DECIMAL(18, 8)),
+            Column("trend", Integer),
+            Column("signal", String(16)),
             UniqueConstraint("symbol", "interval", "timestamp", name="uq_market_data"),
             extend_existing=True,
         )
@@ -213,7 +218,7 @@ class DBLogger:
 
     # --- Market data cache helpers -------------------------------------------
     def get_market_data(self, symbol: str, interval: int, start_time: datetime) -> pd.DataFrame:
-        """Return cached OHLC rows newer than ``start_time``."""
+        """Return cached OHLC and indicator rows newer than ``start_time``."""
 
         query = (
             select(self.market_data)
@@ -234,16 +239,17 @@ class DBLogger:
         df = pd.DataFrame(rows)
         df.set_index("timestamp", inplace=True)
 
-        # SQLAlchemy returns ``Decimal`` objects for ``DECIMAL`` columns. Cast
-        # them to native floats so downstream indicator math (which mixes
-        # numpy/pandas float dtypes) does not trigger ``Decimal`` type errors.
-        numeric_cols = ["open", "high", "low", "close", "volume"]
-        df[numeric_cols] = df[numeric_cols].astype(float)
+        numeric_cols = ["open", "high", "low", "close", "volume", "rsi", "atr", "supertrend"]
+        for col in numeric_cols:
+            if col in df:
+                df[col] = df[col].astype(float)
+        if "trend" in df:
+            df["trend"] = df["trend"].astype("Int64")
 
-        return df[numeric_cols].sort_index()
+        return df.sort_index()
 
     def cache_market_data(self, symbol: str, interval: int, df: pd.DataFrame) -> None:
-        """Persist OHLC data and prune any cache older than two years."""
+        """Persist OHLC and indicator data and prune any cache older than two years."""
 
         if df.empty:
             return
@@ -251,8 +257,9 @@ class DBLogger:
         cutoff = datetime.utcnow() - timedelta(days=365 * 2)
         df = df.sort_index()
 
-        records = [
-            {
+        records = []
+        for ts, row in df.iterrows():
+            record = {
                 "symbol": symbol,
                 "interval": interval,
                 "timestamp": ts.to_pydatetime(),
@@ -261,9 +268,13 @@ class DBLogger:
                 "low": float(row["low"]),
                 "close": float(row["close"]),
                 "volume": float(row["volume"]),
+                "rsi": float(row.get("rsi")) if "rsi" in row and pd.notna(row.get("rsi")) else None,
+                "atr": float(row.get("atr")) if "atr" in row and pd.notna(row.get("atr")) else None,
+                "supertrend": float(row.get("supertrend")) if "supertrend" in row and pd.notna(row.get("supertrend")) else None,
+                "trend": int(row.get("trend")) if "trend" in row and pd.notna(row.get("trend")) else None,
+                "signal": row.get("signal") if "signal" in row else None,
             }
-            for ts, row in df.iterrows()
-        ]
+            records.append(record)
 
         with self.engine.begin() as conn:
             conn.execute(
