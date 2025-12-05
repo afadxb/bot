@@ -1,3 +1,4 @@
+import math
 import requests
 import pandas as pd
 import time
@@ -43,19 +44,26 @@ def fetch_ohlc(
         print(f"[ERROR] Unknown Kraken symbol for {symbol}")
         return pd.DataFrame()
 
-    cache_start = start_time or datetime.utcnow() - timedelta(minutes=interval * lookback * 2)
-    cached_df = _db_logger.get_market_data(symbol, interval, cache_start)
+    base_interval = 60  # Always pull 1h candles from Kraken
+    target_interval = max(interval, base_interval)
+    resample_rule = f"{target_interval}T" if target_interval != base_interval else None
+
+    multiplier = max(1, math.ceil(target_interval / base_interval))
+    base_lookback = lookback * multiplier
+
+    cache_start = start_time or datetime.utcnow() - timedelta(minutes=target_interval * lookback * 2)
+    cached_df = _db_logger.get_market_data(symbol, target_interval, cache_start)
     if not cached_df.empty and len(cached_df) >= lookback:
         return cached_df.tail(lookback)
 
     if start_time:
         since = int(start_time.timestamp())
     else:
-        since = int(time.time()) - (lookback * interval * 60 * 2)  # 2x buffer
+        since = int(time.time()) - (base_lookback * base_interval * 60 * 2)  # 2x buffer
 
     params = {
         "pair": kraken_symbol,
-        "interval": interval,
+        "interval": base_interval,
         "since": since
     }
 
@@ -92,12 +100,25 @@ def fetch_ohlc(
         df.sort_index(inplace=True)
         df = df[["open", "high", "low", "close", "volume"]]
 
+        if resample_rule:
+            df = (
+                df.resample(resample_rule)
+                .agg({
+                    "open": "first",
+                    "high": "max",
+                    "low": "min",
+                    "close": "last",
+                    "volume": "sum",
+                })
+                .dropna()
+            )
+
         if len(df) < lookback:
             print(f"[WARNING] Only {len(df)} candles returned for {symbol} (expected {lookback})")
             raise ValueError(f"Insufficient data for {symbol}")
 
         trimmed = df.tail(lookback)
-        _db_logger.cache_market_data(symbol, interval, trimmed)
+        _db_logger.cache_market_data(symbol, target_interval, trimmed)
         return trimmed
 
     except requests.exceptions.RequestException as e:
