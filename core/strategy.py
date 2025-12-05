@@ -136,13 +136,20 @@ def generate_signals(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     return result
 
 
-def generate_signal(df: pd.DataFrame, fear_greed_score: float | None = None) -> str | None:
+def generate_signal(
+    df: pd.DataFrame,
+    fear_greed_score: float | None = None,
+    on_bar_close: bool = True,
+) -> str | None:
     """Generate a simple trade signal from the most recent *closed* candle.
 
     - Buy when the latest close is above Supertrend and RSI is below 70.
     - Sell when the latest close is below Supertrend or RSI rises above 70.
     ``fear_greed_score`` can optionally dampen entries: if provided and below
     20, no buy signal is emitted.
+    ``on_bar_close`` forces the function to use the last fully-formed candle
+    (the penultimate row when at least two valid rows exist) so decisions are
+    not based on an in-progress bar.
     """
 
     if df.empty:
@@ -162,10 +169,14 @@ def generate_signal(df: pd.DataFrame, fear_greed_score: float | None = None) -> 
     if valid_rows.empty:
         return None
 
-    last = valid_rows.iloc[-1]
-    price = last[close_col]
-    supertrend = last["supertrend"]
-    rsi = last.get("rsi")
+    if on_bar_close and len(valid_rows) > 1:
+        target_row = valid_rows.iloc[-2]
+    else:
+        target_row = valid_rows.iloc[-1]
+
+    price = target_row[close_col]
+    supertrend = target_row["supertrend"]
+    rsi = target_row.get("rsi")
 
     if rsi is None or pd.isna(rsi):
         rsi = 50

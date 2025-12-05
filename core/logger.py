@@ -3,10 +3,11 @@ from __future__ import annotations
 import csv
 import os
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
+import pandas as pd
 from sqlalchemy import (
     DECIMAL,
     Column,
@@ -16,8 +17,11 @@ from sqlalchemy import (
     MetaData,
     String,
     Table,
+    UniqueConstraint,
     create_engine,
+    inspect,
     select,
+    text,
 )
 from sqlalchemy.orm import sessionmaker
 
@@ -109,11 +113,33 @@ class DBLogger:
             extend_existing=True,
         )
 
+        self.market_data = Table(
+            "market_data",
+            self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("symbol", String(20), nullable=False),
+            Column("interval", Integer, nullable=False),
+            Column("timestamp", DateTime, nullable=False),
+            Column("open", DECIMAL(18, 8), nullable=False),
+            Column("high", DECIMAL(18, 8), nullable=False),
+            Column("low", DECIMAL(18, 8), nullable=False),
+            Column("close", DECIMAL(18, 8), nullable=False),
+            Column("volume", DECIMAL(28, 8), nullable=False),
+            Column("rsi", DECIMAL(18, 8)),
+            Column("atr", DECIMAL(18, 8)),
+            Column("supertrend", DECIMAL(18, 8)),
+            Column("trend", Integer),
+            Column("signal", String(16)),
+            UniqueConstraint("symbol", "interval", "timestamp", name="uq_market_data"),
+            extend_existing=True,
+        )
+
         self.metadata.create_all(self.engine)
         # Reflect in case additional tables exist outside the ones defined
         self.metadata.reflect(bind=self.engine, extend_existing=True)
 
         self.Session = sessionmaker(bind=self.engine)
+        self._ensure_indicator_columns()
 
     # --- Query helpers ---------------------------------------------------------
     def get_open_positions(self) -> list[dict[str, Any]]:
@@ -192,6 +218,134 @@ class DBLogger:
                     timestamp=datetime.utcnow(),
                 )
             )
+
+    # --- Market data cache helpers -------------------------------------------
+    def get_market_data(self, symbol: str, interval: int, start_time: datetime) -> pd.DataFrame:
+        """Return cached OHLC rows newer than ``start_time``."""
+
+        query = (
+            select(self.market_data)
+            .where(
+                (self.market_data.c.symbol == symbol)
+                & (self.market_data.c.interval == interval)
+                & (self.market_data.c.timestamp >= start_time)
+            )
+            .order_by(self.market_data.c.timestamp)
+        )
+
+        with self.engine.connect() as conn:
+            rows = conn.execute(query).mappings().all()
+
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows)
+        df.set_index("timestamp", inplace=True)
+
+        # SQLAlchemy returns ``Decimal`` objects for ``DECIMAL`` columns. Cast
+        # them to native floats so downstream indicator math (which mixes
+        # numpy/pandas float dtypes) does not trigger ``Decimal`` type errors.
+        numeric_cols = [col for col in ["open", "high", "low", "close", "volume", "rsi", "atr", "supertrend"] if col in df.columns]
+        if numeric_cols:
+            df[numeric_cols] = df[numeric_cols].astype(float)
+
+        if "trend" in df.columns:
+            df["trend"] = df["trend"].astype("Int64")
+
+        ordered_cols = [col for col in [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "rsi",
+            "atr",
+            "supertrend",
+            "trend",
+            "signal",
+        ] if col in df.columns]
+
+        return df[ordered_cols].sort_index()
+
+    def cache_market_data(self, symbol: str, interval: int, df: pd.DataFrame) -> None:
+        """Persist OHLC data and prune any cache older than two years."""
+
+        if df.empty:
+            return
+
+        cutoff = datetime.utcnow() - timedelta(days=365 * 2)
+        df = df.sort_index()
+
+        def _safe_number(value: Any) -> Any:
+            if value is None:
+                return None
+            try:
+                if pd.isna(value):
+                    return None
+            except TypeError:
+                pass
+            return float(value)
+
+        def _safe_int(value: Any) -> Any:
+            numeric = _safe_number(value)
+            return int(numeric) if numeric is not None else None
+
+        records = []
+        for ts, row in df.iterrows():
+            record = {
+                "symbol": symbol,
+                "interval": interval,
+                "timestamp": ts.to_pydatetime(),
+                "open": _safe_number(row.get("open")),
+                "high": _safe_number(row.get("high")),
+                "low": _safe_number(row.get("low")),
+                "close": _safe_number(row.get("close")),
+                "volume": _safe_number(row.get("volume")),
+                "rsi": _safe_number(row.get("rsi")),
+                "atr": _safe_number(row.get("atr")),
+                "supertrend": _safe_number(row.get("supertrend")),
+                "trend": _safe_int(row.get("trend")),
+                "signal": row.get("signal"),
+            }
+            records.append(record)
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                self.market_data.delete().where(self.market_data.c.timestamp < cutoff)
+            )
+
+            conn.execute(
+                self.market_data.delete().where(
+                    (self.market_data.c.symbol == symbol)
+                    & (self.market_data.c.interval == interval)
+                    & (self.market_data.c.timestamp >= records[0]["timestamp"])
+                    & (self.market_data.c.timestamp <= records[-1]["timestamp"])
+                )
+            )
+
+            conn.execute(self.market_data.insert(), records)
+
+    def _ensure_indicator_columns(self) -> None:
+        """Add indicator columns to ``market_data`` if the table already exists."""
+
+        inspector = inspect(self.engine)
+        existing_columns = {col["name"] for col in inspector.get_columns("market_data")}
+
+        column_defs = {
+            "rsi": "REAL",
+            "atr": "REAL",
+            "supertrend": "REAL",
+            "trend": "INTEGER",
+            "signal": "TEXT",
+        }
+
+        missing_columns = [name for name in column_defs if name not in existing_columns]
+        if not missing_columns:
+            return
+
+        with self.engine.begin() as conn:
+            for name in missing_columns:
+                conn.execute(text(f"ALTER TABLE market_data ADD COLUMN {name} {column_defs[name]}"))
 
 
 # Convenience exports for modules that import the engine/table directly
